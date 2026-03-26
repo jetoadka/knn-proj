@@ -1,0 +1,21 @@
+# --- Core ---
+torch>=2.0.0
+torchvision
+numpy
+Pillow
+
+
+# --- STYLE TRANSFER ---
+dominate
+scipy
+opencv-python
+
+
+# --- EXPERIMENT TRACKING & CLEAN CODE ---
+wandb
+black
+ruff
+
+
+# --- OTHER ---
+pyyaml

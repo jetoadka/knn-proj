@@ -8,8 +8,9 @@ from torchvision import transforms
 
 # Settings W&B
 wandb.init(
+    entity="knn-proj",
     project="style-transfer",
-    name="knn-proj",
+    name="dummy-data-test",
     config={"model": "CUT", "batch_size": 1, "input_size": 112, "lr": 0.0002},
 )
 
@@ -27,7 +28,7 @@ class NewspaperDataset(Dataset):
         return len(self.image_paths)
 
     def __getitem__(self, idx):
-        img_path = os.path.join(self.root_dir, self.image_names[idx])
+        img_path = os.path.join(self.root_dir, self.image_paths[idx])
         image = Image.open(img_path).convert("RGB")
         if self.transform:
             image = self.transform(image)

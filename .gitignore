@@ -1,6 +1,44 @@
+# --- DATA ---
+data/
+datasets/
+*.zip
+*.tar.gz
+*.jsonl
+*.csv
+*.bin
 
+# --- MODELS AND WEIGHTS ---
+*.pth
+*.pt
+*.ckpt
+*.onnx
+outputs/
+checkpoints/
+models/
 
+# --- BIO EXTRACTIONS ---
+*.npy
+*.npz
+*.sqlite
+
+# --- PYTHON ---
+__pycache__/
+*.py[cod]
+*$py.class
+.env
+.venv
+env/
+venv/
+build/
+dist/
+
+# --- JUPYTER NOTEBOOKS ---
+.ipynb_checkpoints
+*/.ipynb_checkpoints/*
 
 # --- OS & IDE ---
 .vscode/
 .idea/
+.DS_Store
+Thumbs.db
+wandb/
