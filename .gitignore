@@ -1,6 +1,30 @@
 
+# --- Data (large, local only) ---
+data/
 
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+*.so
+venv/
+.venv/
+env/
+
+# --- ML artifacts ---
+*.pth
+*.ckpt
+*.onnx
+*.safetensors
+wandb_logs/
+checkpoints/
 
 # --- OS & IDE ---
 .vscode/
 .idea/
+.DS_Store
+Thumbs.db
