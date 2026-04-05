@@ -113,14 +113,18 @@ def _process_face(zf, face, crop_map, method, page_kpts, page_paths):
 
 
 def _load_page_keypoints(zf: zipfile.ZipFile):
+    """Load keypoints from both .people_gator.jsonl and corresponding_faces files.
+
+    Processes .people_gator.jsonl first so that corresponding_faces keypoints
+    take precedence for overlapping face keys (they have annotator-verified data).
+    """
     kpts: dict[str, list] = {}
     paths: dict[str, str] = {}
-    jsonl_names = [
-        n for n in zf.namelist()
-        if n.endswith(".people_gator.jsonl") or
-        (n.startswith(CORRESPONDING_FACES_PREFIX) and n.endswith(".jsonl"))
-    ]
-    for name in jsonl_names:
+    all_names = zf.namelist()
+    pg_names = [n for n in all_names if n.endswith(".people_gator.jsonl")]
+    cf_names = [n for n in all_names
+                if n.startswith(CORRESPONDING_FACES_PREFIX) and n.endswith(".jsonl")]
+    for name in pg_names + cf_names:
         is_pg = name.endswith(".people_gator.jsonl")
         with zf.open(name) as f:
             for line in f:
