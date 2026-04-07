@@ -7,14 +7,17 @@ datasets/
 *.csv
 *.bin
 
-# --- MODELS AND WEIGHTS ---
+# --- MODELS, WEIGHTS & ML ARTIFACTS ---
 *.pth
 *.pt
 *.ckpt
 *.onnx
+*.safetensors
 outputs/
 checkpoints/
 models/
+wandb_logs/
+wandb/
 
 # --- BIO EXTRACTIONS ---
 *.npy
@@ -25,6 +28,10 @@ models/
 __pycache__/
 *.py[cod]
 *$py.class
+*.egg-info/
+*.egg
+.eggs/
+*.so
 .env
 .venv
 env/
@@ -41,4 +48,3 @@ dist/
 .idea/
 .DS_Store
 Thumbs.db
-wandb/
