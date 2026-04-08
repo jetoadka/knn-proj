@@ -1,5 +1,4 @@
 import os
-import torch
 import wandb
 from PIL import Image
 from torch.utils.data import Dataset, DataLoader

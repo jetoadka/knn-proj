@@ -1,5 +1,8 @@
 # --- DATA ---
 data/
+data_wiki/
+data_people/
+data_combined/
 datasets/
 *.zip
 *.tar.gz

@@ -7,7 +7,7 @@ Face recognition degrades on scanned historical newspapers due to print raster n
 ## Project Phases
 
 1. **Preprocessing** -- Normalize datasets (SCRFD alignment, 112x112 crops, train/dev/test splits)
-2. **Style Transfer** -- Train CUT to transfer newspaper texture onto clean faces (PatchNCE preserves geometry)
+2. **Style Transfer** -- Train CUT to transform clean faces into newspaper-style historical photos (PatchNCE preserves geometry)
 3. **Downstream** -- Fine-tune face recognition with [timm-face](https://github.com/gau-nernst/timm-face) on generated data
 4. **Evaluation** -- Compare Rank-1 accuracy, FAR/FRR on held-out newspaper test set
 
@@ -45,6 +45,20 @@ python -m src.data_prep.dataset_stats --data-dir data
 ```
 
 Use `--method realign` in step 1 for ArcFace-template alignment from page scans (slower, more precise).
+
+## Style Transfer Pipeline
+
+```bash
+# 1. Prepare flat directory structure for CUT (combining target domains)
+python src/style_transfer/prepare_cut_data.py \
+    --clean sample_data/webface4m \
+    --noisy sample_data/people_gator/aligned_112/train sample_data/wiki_face_112 \
+    --output src/style_transfer/data_combined
+
+# 2. Train the CUT model
+cd src/style_transfer/cut_model
+python train.py --dataroot ../data_combined --name exp_combined --model cut --load_size 112 --crop_size 112
+```
 
 ## Project Structure
 
