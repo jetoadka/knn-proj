@@ -50,7 +50,4 @@ dist/
 .vscode/
 .idea/
 .DS_Store
-Thumbs.db
-
-# --- RESULTS ---
-results/
+Thumbs.dbresults/

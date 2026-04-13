@@ -1,0 +1,11 @@
+[
+  {
+    "experiment": "smoke-test",
+    "rank1_accuracy": 1.0,
+    "rank5_accuracy": 1.0,
+    "tar_at_far_1e4": 0.0,
+    "threshold_at_far_1e4": 0.999476432800293,
+    "kfold_verification_accuracy": 0.9996,
+    "checkpoint": "checkpoints/smoke-test/epoch_2.pth"
+  }
+]
