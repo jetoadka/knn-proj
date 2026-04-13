@@ -86,7 +86,16 @@ def load_cut_generator(checkpoint_dir: Path, device: str):
 
     print(f"Loading generator from {ckpt_path}")
     state_dict = torch.load(str(ckpt_path), map_location="cpu")
-    netG.load_state_dict(state_dict)
+    
+    # Handle DataParallel/DDP wrappers in checkpoints
+    clean_state_dict = {}
+    for k, v in state_dict.items():
+        if k.startswith("module."):
+            clean_state_dict[k[7:]] = v
+        else:
+            clean_state_dict[k] = v
+            
+    netG.load_state_dict(clean_state_dict)
     netG.to(device)
     netG.eval()
     return netG
