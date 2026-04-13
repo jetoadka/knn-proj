@@ -382,7 +382,7 @@ def main():
     # Training
     parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--batch-size", type=int, default=64)
-    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--weight-decay", type=float, default=1e-1)
     parser.add_argument("--num-workers", type=int, default=4)
 
