@@ -549,14 +549,15 @@ def main():
             if val_acc > best_val_acc:
                 best_val_acc = val_acc
                 ckpt_path = save_dir / "best_model.pth"
+                config_dict = {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()}
+                config_dict["n_classes"] = n_classes
                 torch.save({
                     "epoch": epoch,
                     "step": global_step,
                     "model_state_dict": model.state_dict(),
                     "optimizer_state_dict": optimizer.state_dict(),
                     "val_accuracy": val_acc,
-                    "config": {k: str(v) if isinstance(v, Path) else v
-                               for k, v in vars(args).items()},
+                    "config": config_dict,
                 }, ckpt_path)
                 print(f"  New best model saved: {ckpt_path} (acc={val_acc:.4f})")
 
@@ -571,13 +572,14 @@ def main():
         # Save periodic checkpoint
         if epoch % 10 == 0 or epoch == args.epochs:
             ckpt_path = save_dir / f"epoch_{epoch}.pth"
+            config_dict = {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()}
+            config_dict["n_classes"] = n_classes
             torch.save({
                 "epoch": epoch,
                 "step": global_step,
                 "model_state_dict": model.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
-                "config": {k: str(v) if isinstance(v, Path) else v
-                           for k, v in vars(args).items()},
+                "config": config_dict,
             }, ckpt_path)
 
     # ------------------------------------------------------------------

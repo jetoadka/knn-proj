@@ -110,7 +110,17 @@ def load_model_from_checkpoint(
     )
 
     state_dict = ckpt.get("model_state_dict", ckpt.get("model", {}))
-    model.load_state_dict(state_dict, strict=False)
+    
+    # Filter state_dict to avoid shape mismatch errors (e.g. head.weight sizes varying by training dataset)
+    model_state = model.state_dict()
+    valid_state_dict = {}
+    for k, v in state_dict.items():
+        if k in model_state and v.shape == model_state[k].shape:
+            valid_state_dict[k] = v
+        elif k in model_state:
+            print(f"    Skipped {k} (shape mismatch: {v.shape} vs {model_state[k].shape})")
+            
+    model.load_state_dict(valid_state_dict, strict=False)
     model.to(device)
     model.eval()
 
