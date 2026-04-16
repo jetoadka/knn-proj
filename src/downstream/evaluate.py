@@ -140,6 +140,7 @@ def evaluate_single(
     experiment_name: str,
     batch_size: int = 64,
     num_workers: int = 4,
+    annotations_jsonl: Path | str | None = None,
 ) -> dict:
     """Run the full evaluation pipeline for a single checkpoint."""
     print(f"\n{'='*60}")
@@ -151,8 +152,11 @@ def evaluate_single(
         checkpoint_path, backbone, embedding_dim, device,
     )
 
-    # Load test data
-    test_ds = ImageFolderFlat(test_dir, transform=EVAL_TRANSFORM)
+    # Load test data (use JSONL annotations for correct person-level identity labels)
+    test_ds = ImageFolderFlat(
+        test_dir, transform=EVAL_TRANSFORM,
+        annotations_jsonl=annotations_jsonl,
+    )
     test_loader = DataLoader(
         test_ds, batch_size=batch_size, shuffle=False,
         num_workers=num_workers, pin_memory=True,
@@ -197,6 +201,11 @@ def main():
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument("--output", type=Path, default=None,
                         help="Save all results as a JSON file")
+    parser.add_argument("--annotations-jsonl", type=Path, default=None,
+                        help="JSONL file with person identity annotations "
+                             "(e.g. corresponding_faces_test.jsonl). "
+                             "When provided, labels are derived from person_name "
+                             "instead of folder structure.")
     parser.add_argument("--wandb-mode", type=str, default="disabled",
                         choices=["online", "offline", "disabled"],
                         help="W&B mode for evaluation logging")
@@ -245,6 +254,7 @@ def main():
             ckpt_path, args.test_dir, args.backbone,
             args.embedding_dim, device, name,
             args.batch_size, args.num_workers,
+            annotations_jsonl=args.annotations_jsonl,
         )
         all_results.append(results)
 

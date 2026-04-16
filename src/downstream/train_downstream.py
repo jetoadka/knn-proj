@@ -315,35 +315,62 @@ def evaluate(
     dataloader: DataLoader,
     device: torch.device,
 ) -> dict:
-    """Evaluate model: compute embeddings and classification accuracy."""
+    """Evaluate model using embedding-based rank-1 accuracy.
+
+    Instead of computing classification accuracy against training class
+    indices (which is meaningless when the validation set has different
+    identities), this extracts normalized embeddings and computes rank-1
+    identification accuracy using a gallery/probe split.
+    """
     model.eval()
 
     all_embeddings = []
     all_labels = []
-    correct = 0
-    total = 0
 
     for images, labels in tqdm(dataloader, desc="Evaluating", dynamic_ncols=True):
         images = images.to(device)
-        labels_dev = labels.to(device)
-
-        logits, emb = model(images, labels_dev)
-        preds = logits.argmax(dim=1)
-        correct += (preds == labels_dev).sum().item()
-        total += labels.size(0)
-
+        emb = model.get_embedding(images)
         all_embeddings.append(emb.cpu())
         all_labels.append(labels)
 
-    all_embeddings = torch.cat(all_embeddings, dim=0)
-    all_labels = torch.cat(all_labels, dim=0)
+    all_embeddings = torch.cat(all_embeddings, dim=0).numpy()
+    all_labels = torch.cat(all_labels, dim=0).numpy()
 
-    accuracy = correct / max(total, 1)
+    # Normalize embeddings
+    norms = np.linalg.norm(all_embeddings, axis=1, keepdims=True) + 1e-8
+    all_embeddings = all_embeddings / norms
+
+    # Split into gallery (first image per identity) and probe (rest)
+    unique_labels = np.unique(all_labels)
+    gallery_idx = []
+    probe_idx = []
+    for label in unique_labels:
+        indices = np.where(all_labels == label)[0]
+        gallery_idx.append(indices[0])
+        if len(indices) > 1:
+            probe_idx.extend(indices[1:].tolist())
+
+    if not probe_idx:
+        # Not enough images per identity for rank-based evaluation;
+        # fall back to a simple nearest-neighbour leave-one-out accuracy
+        sim = all_embeddings @ all_embeddings.T
+        np.fill_diagonal(sim, -1.0)  # exclude self-match
+        top1 = np.argmax(sim, axis=1)
+        correct = np.sum(all_labels[top1] == all_labels)
+        accuracy = correct / len(all_labels)
+    else:
+        gallery_idx = np.array(gallery_idx)
+        probe_idx = np.array(probe_idx)
+        sim = all_embeddings[probe_idx] @ all_embeddings[gallery_idx].T
+        top1 = np.argmax(sim, axis=1)
+        top1_labels = all_labels[gallery_idx[top1]]
+        correct = np.sum(top1_labels == all_labels[probe_idx])
+        accuracy = correct / len(probe_idx)
 
     return {
         "accuracy": accuracy,
-        "embeddings": all_embeddings,
-        "labels": all_labels,
+        "embeddings": torch.from_numpy(all_embeddings),
+        "labels": torch.from_numpy(all_labels),
     }
 
 

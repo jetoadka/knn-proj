@@ -233,25 +233,65 @@ def generate_pairs_from_embeddings(
 # ============================================================================
 
 class ImageFolderFlat(Dataset):
-    """Load images from a flat or nested directory for embedding extraction."""
+    """Load images from a flat or nested directory for embedding extraction.
+
+    When *annotations_jsonl* is provided the labels are derived from the
+    ``person_name`` field in the JSONL file (one JSON object per line).
+    Only images that appear in the annotations are included – this avoids
+    treating unannotated crops as identities.
+
+    Without annotations the class falls back to inferring the identity from
+    the directory structure (parent-folder name or filename prefix), which
+    is correct for datasets like ``wiki_face_112`` but **incorrect** for
+    ``people_gator`` where folder names represent libraries, not persons.
+    """
 
     IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png"}
 
-    def __init__(self, root: Path, transform=None):
-        self.root = root
+    def __init__(self, root: Path, transform=None,
+                 annotations_jsonl: Path | str | None = None):
+        self.root = Path(root)
         self.transform = transform
-        self.images = sorted(
-            p for p in root.rglob("*")
+
+        all_images = sorted(
+            p for p in self.root.rglob("*")
             if p.suffix.lower() in self.IMAGE_EXTENSIONS
         )
-        # Extract labels from parent folder name
-        self.labels = []
+
+        # --- Build identity labels ---
+        self.images: list[Path] = []
+        self.labels: list[int] = []
         label_map: dict[str, int] = {}
-        for p in self.images:
-            identity = p.parent.name if p.parent != root else p.stem.rsplit("_", 1)[0]
-            if identity not in label_map:
-                label_map[identity] = len(label_map)
-            self.labels.append(label_map[identity])
+
+        if annotations_jsonl is not None:
+            # Use JSONL annotations for ground-truth person identities
+            from evaluation.identity_mapping import load_identity_map_for_dir
+            abs_to_person = load_identity_map_for_dir(self.root, annotations_jsonl)
+            if not abs_to_person:
+                print(f"  WARNING: No annotations matched images in {self.root}")
+
+            for p in all_images:
+                person = abs_to_person.get(p.resolve())
+                if person is None:
+                    continue  # skip unannotated images
+                if person not in label_map:
+                    label_map[person] = len(label_map)
+                self.images.append(p)
+                self.labels.append(label_map[person])
+
+            n_skipped = len(all_images) - len(self.images)
+            if n_skipped:
+                print(f"  Skipped {n_skipped} unannotated images")
+            print(f"  Loaded {len(self.images)} annotated images, "
+                  f"{len(label_map)} person identities")
+        else:
+            # Fallback: infer identity from folder structure
+            self.images = all_images
+            for p in self.images:
+                identity = p.parent.name if p.parent != self.root else p.stem.rsplit("_", 1)[0]
+                if identity not in label_map:
+                    label_map[identity] = len(label_map)
+                self.labels.append(label_map[identity])
 
     def __len__(self):
         return len(self.images)
@@ -368,6 +408,8 @@ def main():
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument("--experiment-name", type=str, default="eval")
+    parser.add_argument("--annotations-jsonl", type=Path, default=None,
+                        help="JSONL file with person identity annotations")
     parser.add_argument("--output", type=Path, default=None,
                         help="Save results as JSON")
     args = parser.parse_args()
@@ -406,7 +448,10 @@ def main():
         transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5]),
     ])
 
-    eval_ds = ImageFolderFlat(args.eval_dir, transform=transform)
+    eval_ds = ImageFolderFlat(
+        args.eval_dir, transform=transform,
+        annotations_jsonl=args.annotations_jsonl,
+    )
     eval_loader = DataLoader(eval_ds, batch_size=args.batch_size, shuffle=False, num_workers=4)
     print(f"Eval dataset: {len(eval_ds)} images")
 
