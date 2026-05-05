@@ -8,6 +8,7 @@ Usage:
 """
 
 import argparse
+import json
 from collections import Counter
 from pathlib import Path
 
@@ -115,10 +116,84 @@ def stats_webface4m(data_dir: Path):
         print("  [empty]")
 
 
+def _read_jsonl(path: Path) -> list[dict]:
+    rows = []
+    with path.open() as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            rows.append(json.loads(line))
+    return rows
+
+
+def stats_filtering(filter_report: Path | None, kept_manifest: Path | None, rejected_manifest: Path | None):
+    """Report filtering results and distribution drift."""
+    if not filter_report and not kept_manifest and not rejected_manifest:
+        return
+
+    print("\n[filtering] Quality and diversity filtering")
+    report_data = None
+    if filter_report:
+        if filter_report.exists():
+            report_data = json.loads(filter_report.read_text())
+            print(f"  Report file: {filter_report}")
+            print(f"  Total input: {report_data.get('total_input', 'n/a')}")
+            print(f"  Kept: {report_data.get('total_kept', 'n/a')}")
+            print(f"  Rejected: {report_data.get('total_rejected', 'n/a')}")
+            for split_report in report_data.get("split_reports", []):
+                split = split_report.get("split", "unknown")
+                kept = split_report.get("kept_images", 0)
+                inp = max(split_report.get("input_images", 0), 1)
+                print(f"  {split}: kept {kept}/{inp} ({100.0 * kept / inp:.1f}%)")
+                before = split_report.get("libraries_before", {})
+                after = split_report.get("libraries_after", {})
+                if before and after:
+                    drifts = []
+                    for lib in sorted(before):
+                        b = before[lib] / inp
+                        a = after.get(lib, 0) / max(kept, 1)
+                        drifts.append((lib, a - b))
+                    drifts.sort(key=lambda x: abs(x[1]), reverse=True)
+                    top = ", ".join(f"{lib}:{delta:+.3f}" for lib, delta in drifts[:5])
+                    print(f"    Library share drift (top): {top}")
+        else:
+            print(f"  Report file not found: {filter_report}")
+
+    kept_rows = _read_jsonl(kept_manifest) if kept_manifest and kept_manifest.exists() else []
+    rejected_rows = _read_jsonl(rejected_manifest) if rejected_manifest and rejected_manifest.exists() else []
+    if kept_manifest and not kept_rows and not kept_manifest.exists():
+        print(f"  Kept manifest not found: {kept_manifest}")
+    if rejected_manifest and not rejected_rows and not rejected_manifest.exists():
+        print(f"  Rejected manifest not found: {rejected_manifest}")
+
+    if kept_rows:
+        scores = sorted(
+            r.get("quality_score")
+            for r in kept_rows
+            if isinstance(r.get("quality_score"), (int, float))
+        )
+        if scores:
+            n = len(scores)
+            q25 = scores[int(0.25 * (n - 1))]
+            q50 = scores[int(0.50 * (n - 1))]
+            q75 = scores[int(0.75 * (n - 1))]
+            print(f"  Kept quality score quantiles: q25={q25:.4f}, q50={q50:.4f}, q75={q75:.4f}")
+        print(f"  Kept manifest rows: {len(kept_rows)}")
+    if rejected_rows:
+        print(f"  Rejected manifest rows: {len(rejected_rows)}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Dataset statistics")
     parser.add_argument("--data-dir", type=Path, default=Path("data"),
                         help="Root data directory (default: data)")
+    parser.add_argument("--filter-report", type=Path, default=None,
+                        help="Optional path to filter_report.json")
+    parser.add_argument("--kept-manifest", type=Path, default=None,
+                        help="Optional path to kept_manifest.jsonl")
+    parser.add_argument("--rejected-manifest", type=Path, default=None,
+                        help="Optional path to rejected_manifest.jsonl")
     args = parser.parse_args()
 
     print("=" * 60)
@@ -133,6 +208,7 @@ def main():
 
     print("\n[webface4m] Source domain - clean faces (WebDataset)")
     stats_webface4m(args.data_dir)
+    stats_filtering(args.filter_report, args.kept_manifest, args.rejected_manifest)
 
     print("\n" + "=" * 60)
 

@@ -12,6 +12,7 @@ Usage:
 """
 
 import argparse
+import csv
 import json
 import random
 import sys
@@ -27,21 +28,23 @@ ARCFACE_KEYPOINTS = np.array(
      [41.5493, 92.3655], [70.7299, 92.2041]],
     dtype=np.float32,
 )
-TARGET_SIZE = (112, 112)
+DEFAULT_TARGET_SIZE = (112, 112)
 CORRESPONDING_FACES_PREFIX = "people_gator__corresponding_faces__2026-02-11"
 ALIGNED_CROPS_SUFFIX = ".peoplegator_aligned_crops"
 DATA_PREFIX = "people_gator__data/"
 
 
-def resize_image_bytes(image_bytes: bytes) -> np.ndarray:
+def resize_image_bytes(image_bytes: bytes, target_size: tuple[int, int]) -> np.ndarray:
     buf = np.frombuffer(image_bytes, dtype=np.uint8)
     img = cv2.imdecode(buf, cv2.IMREAD_COLOR)
     if img is None:
         raise ValueError("Failed to decode image")
-    return cv2.resize(img, TARGET_SIZE, interpolation=cv2.INTER_AREA)
+    return cv2.resize(img, target_size, interpolation=cv2.INTER_AREA)
 
 
-def realign_from_page(page_bytes: bytes, keypoints: list[list[float]]) -> np.ndarray | None:
+def realign_from_page(
+    page_bytes: bytes, keypoints: list[list[float]], target_size: tuple[int, int]
+) -> np.ndarray | None:
     """Warp a face from a page scan onto the ArcFace 5-point template."""
     buf = np.frombuffer(page_bytes, dtype=np.uint8)
     page = cv2.imdecode(buf, cv2.IMREAD_COLOR)
@@ -50,8 +53,11 @@ def realign_from_page(page_bytes: bytes, keypoints: list[list[float]]) -> np.nda
     src = np.array(keypoints, dtype=np.float32)
     if src.shape != (5, 2):
         return None
-    M, _ = cv2.estimateAffinePartial2D(src, ARCFACE_KEYPOINTS, ransacReprojThreshold=float("inf"))
-    return cv2.warpAffine(page, M, TARGET_SIZE, flags=cv2.INTER_CUBIC) if M is not None else None
+    dst_template = ARCFACE_KEYPOINTS.copy()
+    dst_template[:, 0] *= target_size[0] / DEFAULT_TARGET_SIZE[0]
+    dst_template[:, 1] *= target_size[1] / DEFAULT_TARGET_SIZE[1]
+    M, _ = cv2.estimateAffinePartial2D(src, dst_template, ransacReprojThreshold=float("inf"))
+    return cv2.warpAffine(page, M, target_size, flags=cv2.INTER_CUBIC) if M is not None else None
 
 
 def sample_diverse(items: list[str], n: int | None) -> list[str]:
@@ -103,13 +109,13 @@ def _assign_splits(crop_map: dict, dev_faces: set, test_faces: set) -> dict[str,
     return splits
 
 
-def _process_face(zf, face, crop_map, method, page_kpts, page_paths):
+def _process_face(zf, face, crop_map, method, page_kpts, page_paths, target_size):
     """Read one face from the archive and return the processed image array."""
     if method == "realign" and face in page_kpts:
-        img = realign_from_page(zf.read(page_paths[face]), page_kpts[face])
+        img = realign_from_page(zf.read(page_paths[face]), page_kpts[face], target_size)
         if img is not None:
             return img
-    return resize_image_bytes(zf.read(crop_map[face]))
+    return resize_image_bytes(zf.read(crop_map[face]), target_size)
 
 
 def _load_page_keypoints(zf: zipfile.ZipFile):
@@ -165,6 +171,48 @@ def _extract_jsonls(zf: zipfile.ZipFile, output_dir: Path, kept_faces: set[str] 
         print(f"  {short}: {len(records)} records")
 
 
+def _target_subdir_name(target_size: tuple[int, int]) -> str:
+    if target_size == DEFAULT_TARGET_SIZE:
+        return "aligned_112"
+    return f"aligned_{target_size[0]}x{target_size[1]}"
+
+
+def _image_metrics(img: np.ndarray) -> dict[str, float]:
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    return {
+        "brightness_mean": float(np.mean(gray)),
+        "contrast_std": float(np.std(gray)),
+        "sharpness_laplacian_var": float(cv2.Laplacian(gray, cv2.CV_64F).var()),
+    }
+
+
+def _write_metadata(records: list[dict], metadata_path: Path, fmt: str):
+    metadata_path.parent.mkdir(parents=True, exist_ok=True)
+    if fmt == "csv":
+        fields = [
+            "split",
+            "face",
+            "library",
+            "identity",
+            "output_path",
+            "width",
+            "height",
+            "file_size_bytes",
+            "brightness_mean",
+            "contrast_std",
+            "sharpness_laplacian_var",
+        ]
+        with metadata_path.open("w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fields)
+            writer.writeheader()
+            writer.writerows(records)
+        return
+
+    with metadata_path.open("w") as f:
+        for record in records:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Preprocess people_gator face crops")
     parser.add_argument("--zip-path", type=Path, required=True)
@@ -174,6 +222,13 @@ def main():
     parser.add_argument("--limit", type=int, default=None,
                         help="Max train images (for generating sample subsets)")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--target-size", type=int, nargs=2, metavar=("WIDTH", "HEIGHT"),
+                        default=list(DEFAULT_TARGET_SIZE),
+                        help="Output face size in pixels (default: 112 112)")
+    parser.add_argument("--metadata-path", type=Path, default=None,
+                        help="Optional metadata output path (.jsonl or .csv)")
+    parser.add_argument("--metadata-format", choices=["jsonl", "csv"], default="jsonl",
+                        help="Metadata file format (default: jsonl)")
     args = parser.parse_args()
 
     if not args.zip_path.exists():
@@ -181,7 +236,12 @@ def main():
         sys.exit(1)
 
     random.seed(args.seed)
-    aligned_dir = args.output_dir / "aligned_112"
+    target_size = (args.target_size[0], args.target_size[1])
+    if target_size[0] <= 0 or target_size[1] <= 0:
+        print("Error: target width and height must be positive integers", file=sys.stderr)
+        sys.exit(1)
+
+    aligned_dir = args.output_dir / _target_subdir_name(target_size)
     for split in ("train", "dev", "test"):
         (aligned_dir / split).mkdir(parents=True, exist_ok=True)
 
@@ -203,20 +263,41 @@ def main():
             print(f"  Keypoints for {len(page_kpts)} faces")
 
         counts = dict.fromkeys(("train", "dev", "test", "skipped"), 0)
+        metadata_records: list[dict] = []
         for split, faces in splits.items():
             for face in tqdm(faces, desc=split):
                 out_path = aligned_dir / split / face
                 out_path.parent.mkdir(parents=True, exist_ok=True)
                 try:
-                    img = _process_face(zf, face, crop_map, args.method, page_kpts, page_paths)
-                    cv2.imwrite(str(out_path), img)
+                    img = _process_face(
+                        zf, face, crop_map, args.method, page_kpts, page_paths, target_size
+                    )
+                    if not cv2.imwrite(str(out_path), img):
+                        raise ValueError("Failed to write image")
                     counts[split] += 1
+                    rel_parts = Path(face).parts
+                    identity = str(Path(face).parent)
+                    record = {
+                        "split": split,
+                        "face": face,
+                        "library": rel_parts[0] if rel_parts else "",
+                        "identity": identity,
+                        "output_path": str(out_path.relative_to(args.output_dir)),
+                        "width": int(img.shape[1]),
+                        "height": int(img.shape[0]),
+                        "file_size_bytes": out_path.stat().st_size,
+                    }
+                    record.update(_image_metrics(img))
+                    metadata_records.append(record)
                 except Exception as e:
                     tqdm.write(f"  Skipped {face}: {e}")
                     counts["skipped"] += 1
 
         all_kept = {f for faces in splits.values() for f in faces} if args.limit else None
         _extract_jsonls(zf, args.output_dir, all_kept)
+        if args.metadata_path is not None:
+            _write_metadata(metadata_records, args.metadata_path, args.metadata_format)
+            print(f"  Metadata written: {args.metadata_path} ({len(metadata_records)} rows)")
 
     print(f"\nDone: train={counts['train']}, dev={counts['dev']}, test={counts['test']}", end="")
     print(f", skipped={counts['skipped']}" if counts["skipped"] else "")
