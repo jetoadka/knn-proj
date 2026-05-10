@@ -3,59 +3,34 @@
 Face recognition degrades on scanned historical newspapers due to print raster noise. This project bridges the domain gap using **CUT** (Contrastive Unpaired Translation) to synthetically transform clean face photos into newspaper-style images, then fine-tunes a recognition model on the augmented data.
 
 **Team:** xbuchm03 (Nadzeya Antsipenka, Adriana Buchmei, Rostislav Lán)
-
 ## Project Phases
 
-1. **Preprocessing** -- Normalize datasets (SCRFD alignment, 112x112 crops, train/dev/test splits)
-2. **Style Transfer** -- Train CUT to transform clean faces into newspaper-style historical photos (PatchNCE preserves geometry)
-3. **Downstream** -- Fine-tune face recognition with [timm-face](https://github.com/gau-nernst/timm-face) on generated data
-4. **Evaluation** -- Compare Rank-1 accuracy, FAR/FRR on held-out newspaper test set
+1. **Preprocessing & Filtering** -- Normalize datasets (112x112 crops), apply a custom filtration pipeline (quality scoring, face detection certainty, reconstruction error), and use K-means clustering to separate target domains (e.g., colored vs. grayscale historical newspaper).
+2. **Style Transfer** -- Train the Contrastive Unpaired Translation (CUT) architecture to transform clean faces into newspaper-style historical photos, utilizing PatchNCE loss to strictly preserve biometric geometry.
+3. **Downstream Task** -- Fine-tune a face recognition classifier (ConvNeXt-Atto with CosFace loss) using the [timm](https://github.com/huggingface/pytorch-image-models) library on the synthetically augmented data.
+4. **Evaluation** -- Compare Rank-1/5 accuracy, Precision@1, NDCG@10, and TAR@FAR=$10^{-4}$ on a strictly held-out historical newspaper test set.
 
 ## Datasets
 
-Full data lives under `data/` (gitignored). A ~100-image subset is committed in `sample_data/`.
+Full data lives under the `data/` directory (ignored in git to save space). A small illustrative subset (~100 images) is committed in `sample_data/` to comply with upload limits and demonstrate the pipeline.
 
 | Dataset | Role | Size | Resolution |
 | ------- | ---- | ---- | ---------- |
 | [WebFace4M](https://huggingface.co/datasets/gaunernst/webface4m-wds-gz) | Source domain (clean faces) | ~4.2M images, 205k identities | 112x112 |
-| people_gator | Target domain (newspaper faces) | 16,120 aligned crops | 112x112 |
-| wiki_face_112 | Supplementary (Wikipedia portraits) | 3,223 images, 1,538 identities | 112x112 |
-
-## Data Preparation
-
-All dataset preprocessing, filtering, and raw-to-filtered instructions were moved to:
-
-- `src/data_prep/README.md`
-
-## Style Transfer Pipeline
-
-```bash
-# 1. Prepare flat directory structure for CUT (combining target domains)
-python src/style_transfer/prepare_cut_data.py \
-    --clean sample_data/webface4m \
-    --noisy sample_data/people_gator/aligned_112/train sample_data/wiki_face_112 \
-    --output src/style_transfer/data_combined
-
-# 2. Train the CUT model
-cd src/style_transfer/cut_model
-python train.py --dataroot ../data_combined --name exp_combined --model cut --load_size 112 --crop_size 112
-```
+| People Gator | Target domain (newspaper faces) | 16,120 aligned crops | 112x112 |
+| WikiFace | Supplementary (historical portraits)| 3,223 images, 1,538 identities | 112x112 |
 
 ## Project Structure
 
+Our source code is divided into logical modules. **Each subdirectory inside `src/` contains its own dedicated `README.md` file** with detailed instructions on how to execute the specific scripts, format the data, and reproduce our experiments.
+
 ```text
 src/
-├── data_prep/          # Dataset preprocessing scripts
-├── style_transfer/     # CUT training
-├── downstream/         # timm-face fine-tuning
-└── evaluation/         # Metrics and evaluation
-configs/                # Training configs
+├── data_prep/          # Scripts for WebDataset extraction, filtering, and K-means clustering
+├── style_transfer/     # CUT architecture integration and generator training
+├── downstream/         # Face recognition fine-tuning (ConvNeXt-Atto via timm)
+└── evaluation/         # Metrics calculation and validation scripts
+configs/                # Hyperparameter configurations for training
 sample_data/            # Committed ~100-image subsets (see sample_data/README.md)
+report.pdf              # Final project report detailing methodology, experiments, and results
 ```
-
-## References
-
-- [CUT](https://arxiv.org/abs/2007.15651) -- Park et al., ECCV 2020
-- [timm-face](https://github.com/gau-nernst/timm-face) -- Face recognition training with timm
-- [WebFace4M](https://huggingface.co/datasets/gaunernst/webface4m-wds-gz) -- Large-scale face dataset
-- [SCRFD](https://arxiv.org/abs/2105.04714) -- Face detection for alignment
