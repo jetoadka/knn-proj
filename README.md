@@ -68,7 +68,7 @@ cd src/style_transfer/cut_model
 python train.py --dataroot ../data_combined --name exp_combined --model cut --load_size 112 --crop_size 112
 ```
 
-## Project Structure
+## Filtering Workflow
 
 After generating high-res aligned crops (for example `aligned_224x224`), filter training data with quality metrics while preserving library/identity coverage:
 
