@@ -3,24 +3,9 @@ from __future__ import annotations
 """Fine-tune a face recognition model on prepared datasets with W&B tracking.
 
 Supports training on folder-per-identity datasets using timm backbones
-with ArcFace/CosFace/AdaFace loss heads. Automatically detects CUDA/MPS/CPU.
+with ArcFace/CosFace loss heads. Supports mixed-precision training (AMP)
+for efficient GPU utilisation. Automatically detects CUDA/MPS/CPU.
 
-Usage:
-    # Train baseline (E1) on clean data
-    python -m src.downstream.train_downstream --config configs/baseline_clean.yaml
-
-    # Train with CLI overrides
-    python -m src.downstream.train_downstream \
-        --config configs/augmented_newspaper.yaml \
-        --batch-size 64 --device mps
-
-    # Quick smoke test on sample_data (Mac MPS)
-    python -m src.downstream.train_downstream \
-        --train-dir sample_data/webface4m \
-        --val-dir sample_data/wiki_face_112 \
-        --backbone convnext_atto \
-        --epochs 2 --batch-size 8 --device mps \
-        --run-name smoke-test --wandb-mode offline
 """
 
 import argparse
@@ -155,11 +140,27 @@ class FolderFaceDataset(Dataset):
 # ============================================================================
 
 class ArcFaceHead(nn.Module):
-    """ArcFace / CosFace / AdaFace classification head."""
+    """ArcFace / CosFace classification head.
+
+    Both losses operate on cosine similarities between L2-normalized
+    embeddings and L2-normalized class-weight vectors.  During training
+    a margin penalty is applied to the logit of the *correct* class so
+    that the network must produce embeddings that are angularly closer
+    to their class centre than competing classes — this is what makes
+    the learned embedding space discriminative for face recognition.
+
+    Without a margin (plain cosine softmax) the model converges but
+    the resulting embeddings are much less separable at test time.
+    """
 
     def __init__(self, embedding_dim: int, n_classes: int, loss_type: str = "cosface",
                  s: float = 64.0, m: float = 0.4):
         super().__init__()
+        if loss_type not in ("cosface", "arcface"):
+            raise ValueError(
+                f"Unknown loss_type '{loss_type}'. "
+                f"Supported: 'cosface', 'arcface'."
+            )
         self.loss_type = loss_type
         self.s = s
         self.m = m
@@ -178,15 +179,14 @@ class ArcFaceHead(nn.Module):
             return cosine
 
         # Apply margin
+        one_hot = F.one_hot(labels, num_classes=self.weight.shape[0]).float()
         if self.loss_type == "cosface":
-            one_hot = F.one_hot(labels, num_classes=self.weight.shape[0]).float()
+            # CosFace: subtract margin m from the cosine of the target class
             logits = cosine - one_hot * self.m
         elif self.loss_type == "arcface":
+            # ArcFace: add angular margin m to the angle of the target class
             theta = torch.acos(torch.clamp(cosine, -1.0 + 1e-7, 1.0 - 1e-7))
-            one_hot = F.one_hot(labels, num_classes=self.weight.shape[0]).float()
             logits = torch.cos(theta + one_hot * self.m)
-        else:
-            logits = cosine
 
         return logits * self.s
 
@@ -199,12 +199,45 @@ class FaceRecModel(nn.Module):
         super().__init__()
 
         bk = backbone_kwargs or {}
-        self.backbone = timm.create_model(
-            backbone_name,
-            pretrained=True,
-            num_classes=0,  # Remove classifier, get features
-            **bk,
-        )
+
+        # When using non-default patch_size (e.g., patch_size=2 for 112×112),
+        # the pretrained stem weights won't match. We handle this by:
+        # 1. Creating the model WITHOUT pretrained weights (correct architecture)
+        # 2. Loading pretrained weights with strict=False (skips mismatched stem)
+        # This keeps all ConvNeXt block weights pretrained; only the stem trains from scratch.
+        has_custom_patch = "patch_size" in bk and bk["patch_size"] != 4
+        if has_custom_patch:
+            self.backbone = timm.create_model(
+                backbone_name,
+                pretrained=False,
+                num_classes=0,
+                **bk,
+            )
+            # Load pretrained weights, skipping mismatched layers
+            pretrained_model = timm.create_model(
+                backbone_name,
+                pretrained=True,
+                num_classes=0,
+            )
+            pretrained_sd = pretrained_model.state_dict()
+            model_sd = self.backbone.state_dict()
+            compatible = {
+                k: v for k, v in pretrained_sd.items()
+                if k in model_sd and v.shape == model_sd[k].shape
+            }
+            self.backbone.load_state_dict(compatible, strict=False)
+            skipped = set(model_sd.keys()) - set(compatible.keys())
+            if skipped:
+                print(f"  Pretrained: loaded {len(compatible)}/{len(model_sd)} layers, "
+                      f"random init: {sorted(skipped)}")
+            del pretrained_model
+        else:
+            self.backbone = timm.create_model(
+                backbone_name,
+                pretrained=True,
+                num_classes=0,
+                **bk,
+            )
 
         # Get actual feature dim from backbone
         with torch.no_grad():
@@ -238,18 +271,27 @@ class FaceRecModel(nn.Module):
 # ============================================================================
 
 class CosineSchedule:
-    """Cosine annealing with linear warmup."""
+    """Cosine annealing with linear warmup.
 
-    def __init__(self, base_lr: float, total_steps: int, warmup_frac: float = 0.05):
+    Matches timm-face's schedule: decays to ``base_lr * decay_multiplier``
+    (default 1% of peak LR) instead of absolute zero, keeping the model
+    learning slightly until the very end of training.
+    """
+
+    def __init__(self, base_lr: float, total_steps: int,
+                 warmup_frac: float = 0.05, decay_multiplier: float = 0.01):
         self.base_lr = base_lr
+        self.final_lr = base_lr * decay_multiplier
         self.total_steps = total_steps
         self.warmup_steps = int(total_steps * warmup_frac)
 
     def get_lr(self, step: int) -> float:
         if step < self.warmup_steps:
             return self.base_lr * step / max(self.warmup_steps, 1)
-        progress = (step - self.warmup_steps) / max(self.total_steps - self.warmup_steps, 1)
-        return self.base_lr * 0.5 * (1 + math.cos(math.pi * progress))
+        if step < self.total_steps:
+            progress = (step - self.warmup_steps) / max(self.total_steps - self.warmup_steps, 1)
+            return self.final_lr + 0.5 * (self.base_lr - self.final_lr) * (1 + math.cos(math.pi * progress))
+        return self.final_lr
 
 
 def train_one_epoch(
@@ -261,10 +303,20 @@ def train_one_epoch(
     epoch: int,
     global_step: int,
     log_interval: int = 50,
+    amp_dtype: torch.dtype | None = None,
 ) -> tuple[float, int]:
-    """Train for one epoch, return (avg_loss, updated_global_step)."""
+    """Train for one epoch, return (avg_loss, updated_global_step).
+
+    Args:
+        amp_dtype: If set, use torch.autocast with this dtype (e.g.
+            ``torch.bfloat16``).  On CPU/MPS this is ignored.
+    """
     model.train()
     criterion = nn.CrossEntropyLoss()
+
+    # AMP setup — GradScaler only needed for float16, not bfloat16
+    amp_enabled = amp_dtype is not None and device.type == "cuda"
+    grad_scaler = torch.amp.GradScaler(device="cuda", enabled=(amp_dtype is torch.float16 and amp_enabled))
 
     total_loss = 0.0
     n_batches = 0
@@ -279,15 +331,20 @@ def train_one_epoch(
         for pg in optimizer.param_groups:
             pg["lr"] = lr
 
-        # Forward
-        logits, embeddings = model(images, labels)
-        loss = criterion(logits, labels)
+        # Forward (with optional AMP)
+        with torch.autocast(device.type, amp_dtype, enabled=amp_enabled):
+            logits, embeddings = model(images, labels)
+            loss = criterion(logits, labels)
 
         # Backward
         optimizer.zero_grad()
-        loss.backward()
+        grad_scaler.scale(loss).backward()
+
+        grad_scaler.unscale_(optimizer)
         grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        optimizer.step()
+
+        grad_scaler.step(optimizer)
+        grad_scaler.update()
 
         # Logging
         loss_val = loss.item()
@@ -336,9 +393,8 @@ def evaluate(
     all_embeddings = torch.cat(all_embeddings, dim=0).numpy()
     all_labels = torch.cat(all_labels, dim=0).numpy()
 
-    # Normalize embeddings
-    norms = np.linalg.norm(all_embeddings, axis=1, keepdims=True) + 1e-8
-    all_embeddings = all_embeddings / norms
+    # Note: get_embedding() already returns L2-normalized embeddings,
+    # so no additional normalization is needed here.
 
     # Split into gallery (first image per identity) and probe (rest)
     unique_labels = np.unique(all_labels)
@@ -402,25 +458,40 @@ def main():
     parser.add_argument("--backbone", type=str, default="convnext_atto",
                         help="timm backbone name")
     parser.add_argument("--loss", type=str, default="cosface",
-                        choices=["cosface", "arcface", "adaface"],
-                        help="Loss function for face recognition")
+                        choices=["cosface", "arcface"],
+                        help="Margin loss for face recognition (cosface=subtractive, arcface=angular)")
     parser.add_argument("--embedding-dim", type=int, default=512)
 
     # Training
-    parser.add_argument("--epochs", type=int, default=30)
+    parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--batch-size", type=int, default=64)
-    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--lr", type=float, default=5e-4)
     parser.add_argument("--weight-decay", type=float, default=1e-1)
     parser.add_argument("--num-workers", type=int, default=4)
+    parser.add_argument("--clip-grad-norm", type=float, default=1.0,
+                        help="Max gradient norm for clipping (0 to disable)")
+    parser.add_argument("--freeze-epochs", type=int, default=0,
+                        help="Number of initial epochs to freeze the backbone")
+    parser.add_argument("--val-annotations", type=Path, default=None,
+                        help="JSONL file with person identity annotations for validation. "
+                             "When provided, val labels are derived from person_name "
+                             "instead of folder structure (critical for people_gator).")
 
     # Infrastructure
     parser.add_argument("--device", type=str, default=None)
+    parser.add_argument("--amp-dtype", type=str, default="bfloat16",
+                        choices=["bfloat16", "float16", "none"],
+                        help="AMP dtype for mixed-precision (CUDA only). "
+                             "Use 'none' for full float32 training.")
     parser.add_argument("--run-name", type=str, default="debug")
     parser.add_argument("--wandb-mode", type=str, default="online",
                         choices=["online", "offline", "disabled"])
     parser.add_argument("--save-dir", type=Path, default=Path("checkpoints"))
     parser.add_argument("--eval-interval", type=int, default=5,
                         help="Evaluate every N epochs")
+    parser.add_argument("--patience", type=int, default=0,
+                        help="Early stopping patience (number of eval cycles without "
+                             "improvement before stopping). 0 = disabled.")
 
     args = parser.parse_args()
 
@@ -432,9 +503,19 @@ def main():
             setattr(args, cli_key, val)
 
     device = get_device(args.device)
+
+    # Resolve AMP dtype
+    amp_dtype_map = {"bfloat16": torch.bfloat16, "float16": torch.float16, "none": None}
+    amp_dtype = amp_dtype_map[args.amp_dtype]
+    if amp_dtype is not None and device.type != "cuda":
+        print(f"Note: AMP disabled (requires CUDA, got {device.type})")
+        amp_dtype = None
+
     print(f"Device: {device}")
     print(f"Backbone: {args.backbone}")
     print(f"Loss: {args.loss}")
+    if amp_dtype:
+        print(f"AMP: {args.amp_dtype}")
 
     # ------------------------------------------------------------------
     # Data
@@ -460,6 +541,12 @@ def main():
         sys.exit(1)
 
     train_ds = FolderFaceDataset(train_dir, transform=transform_train)
+
+    if train_ds.n_classes == 0:
+        print("ERROR: No identities found in training data. "
+              "Check that --train-dir contains images.")
+        sys.exit(1)
+
     train_loader = DataLoader(
         train_ds, batch_size=args.batch_size, shuffle=True,
         num_workers=args.num_workers, pin_memory=True, drop_last=True,
@@ -467,7 +554,18 @@ def main():
 
     val_loader = None
     if val_dir and val_dir.exists():
-        val_ds = FolderFaceDataset(val_dir, transform=transform_val)
+        if args.val_annotations and args.val_annotations.exists():
+            # Use JSONL annotations for correct person-level identity labels.
+            # Without this, folder names (e.g. library names in people_gator)
+            # are used as identities, which is incorrect.
+            sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+            from evaluation.metrics import ImageFolderFlat
+            val_ds = ImageFolderFlat(
+                val_dir, transform=transform_val,
+                annotations_jsonl=args.val_annotations,
+            )
+        else:
+            val_ds = FolderFaceDataset(val_dir, transform=transform_val)
         val_loader = DataLoader(
             val_ds, batch_size=args.batch_size, shuffle=False,
             num_workers=args.num_workers, pin_memory=True,
@@ -476,13 +574,16 @@ def main():
     n_classes = train_ds.n_classes
     print(f"Train: {len(train_ds)} images, {n_classes} classes")
     if val_loader:
-        print(f"Val:   {len(val_ds)} images, {val_ds.n_classes} classes")
+        val_n_classes = val_ds.n_classes if hasattr(val_ds, "n_classes") else len(set(val_ds.labels))
+        print(f"Val:   {len(val_ds)} images, {val_n_classes} classes")
 
     # ------------------------------------------------------------------
     # Model
     # ------------------------------------------------------------------
-    # Note: we use pretrained defaults — don't override patch_size etc.
-    # timm-face uses custom patch_size=2 only when training from scratch.
+    # For fine-tuning we keep the pretrained defaults (patch_size=4 for ConvNeXt)
+    # to use 100% of pretrained weights. timm-face uses patch_size=2 only when
+    # training from scratch on 112×112 input.
+    # ViT models need explicit img_size=112.
     backbone_kwargs = {}
     if "vit" in args.backbone:
         backbone_kwargs["img_size"] = 112
@@ -498,6 +599,14 @@ def main():
     total_params = sum(p.numel() for p in model.parameters())
     print(f"Model parameters: {total_params:,}")
 
+    # ------------------------------------------------------------------
+    # Freezing Logic
+    # ------------------------------------------------------------------
+    if args.freeze_epochs > 0:
+        print(f"Freezing backbone for the first {args.freeze_epochs} epochs...")
+        for param in model.backbone.parameters():
+            param.requires_grad = False
+    
     # ------------------------------------------------------------------
     # Optimizer
     # ------------------------------------------------------------------
@@ -543,18 +652,29 @@ def main():
 
     global_step = 0
     best_val_acc = 0.0
+    patience_counter = 0
+    early_stopped = False
 
     print(f"\n{'='*60}")
     print(f"Starting training: {args.epochs} epochs, {total_steps} steps")
+    if args.patience > 0:
+        print(f"Early stopping: patience={args.patience} eval cycles")
     print(f"Checkpoints: {save_dir}")
     print(f"{'='*60}\n")
 
     for epoch in range(1, args.epochs + 1):
         epoch_start = time.time()
+        
+        # Unfreeze the backbone after the freeze period
+        if args.freeze_epochs > 0 and epoch == args.freeze_epochs + 1:
+            print(f"Unfreezing backbone at epoch {epoch}...")
+            for param in model.backbone.parameters():
+                param.requires_grad = True
 
         avg_loss, global_step = train_one_epoch(
             model, train_loader, optimizer, scheduler,
             device, epoch, global_step,
+            amp_dtype=amp_dtype,
         )
 
         epoch_time = time.time() - epoch_start
@@ -572,9 +692,10 @@ def main():
                     "val/epoch": epoch,
                 }, step=global_step)
 
-            # Save best model
-            if val_acc > best_val_acc:
+            # Save best model (>= ensures we save at least once, even if val_acc stays 0)
+            if val_acc >= best_val_acc:
                 best_val_acc = val_acc
+                patience_counter = 0
                 ckpt_path = save_dir / "best_model.pth"
                 config_dict = {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()}
                 config_dict["n_classes"] = n_classes
@@ -586,7 +707,7 @@ def main():
                     "val_accuracy": val_acc,
                     "config": config_dict,
                 }, ckpt_path)
-                print(f"  New best model saved: {ckpt_path} (acc={val_acc:.4f})")
+                print(f"  Saved best model: {ckpt_path} (acc={val_acc:.4f})")
 
                 if wandb and wandb.run:
                     artifact = wandb.Artifact(
@@ -595,9 +716,17 @@ def main():
                     )
                     artifact.add_file(str(ckpt_path))
                     wandb.log_artifact(artifact)
+            else:
+                patience_counter += 1
+                if args.patience > 0:
+                    print(f"  No improvement ({patience_counter}/{args.patience})")
+                    if patience_counter >= args.patience:
+                        print(f"  ⚠ Early stopping triggered at epoch {epoch} "
+                              f"(best acc={best_val_acc:.4f} at earlier epoch)")
+                        early_stopped = True
 
         # Save periodic checkpoint
-        if epoch % 10 == 0 or epoch == args.epochs:
+        if epoch % 10 == 0 or epoch == args.epochs or early_stopped:
             ckpt_path = save_dir / f"epoch_{epoch}.pth"
             config_dict = {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()}
             config_dict["n_classes"] = n_classes
@@ -609,11 +738,18 @@ def main():
                 "config": config_dict,
             }, ckpt_path)
 
+        # Break out of training loop if early stopping triggered
+        if early_stopped:
+            break
+
     # ------------------------------------------------------------------
     # Summary
     # ------------------------------------------------------------------
     print(f"\n{'='*60}")
-    print(f"Training complete!")
+    if early_stopped:
+        print(f"Training stopped early!")
+    else:
+        print(f"Training complete!")
     print(f"  Best val accuracy: {best_val_acc:.4f}")
     print(f"  Checkpoints in:   {save_dir}")
     print(f"{'='*60}")
