@@ -4,17 +4,11 @@ Usage:
     python -m src.data_prep.preprocess_people_gator \
         --zip-path /path/to/people_gator__data_export.zip \
         --output-dir data/people_gator
-
-    # For a small sample:
-    python -m src.data_prep.preprocess_people_gator \
-        --zip-path /path/to/people_gator__data_export.zip \
-        --output-dir sample_data/people_gator --limit 100
 """
 
 import argparse
 import csv
 import json
-import random
 import shutil
 import sys
 import zipfile
@@ -59,28 +53,6 @@ def realign_from_page(
     dst_template[:, 1] *= target_size[1] / DEFAULT_TARGET_SIZE[1]
     M, _ = cv2.estimateAffinePartial2D(src, dst_template, ransacReprojThreshold=float("inf"))
     return cv2.warpAffine(page, M, target_size, flags=cv2.INTER_CUBIC) if M is not None else None
-
-
-def sample_diverse(items: list[str], n: int | None) -> list[str]:
-    """Sample up to n items, round-robin across the first path component (library)."""
-    if n is None or n >= len(items):
-        return items
-    by_group: dict[str, list[str]] = {}
-    for item in items:
-        by_group.setdefault(item.split("/")[0], []).append(item)
-    for v in by_group.values():
-        random.shuffle(v)
-
-    picked: list[str] = []
-    groups = sorted(by_group.keys())
-    idx = 0
-    while len(picked) < n:
-        batch = [by_group[g][idx] for g in groups if idx < len(by_group[g]) and len(picked) + 1 <= n]
-        if not batch:
-            break
-        picked.extend(batch[:n - len(picked)])
-        idx += 1
-    return picked
 
 
 # --- Zip helpers ---
@@ -220,9 +192,6 @@ def main():
     parser.add_argument("--output-dir", type=Path, default=Path("data/people_gator"))
     parser.add_argument("--method", choices=["resize", "realign"], default="resize",
                         help="resize = fast crop resize; realign = ArcFace alignment from page scans")
-    parser.add_argument("--limit", type=int, default=None,
-                        help="Max train images (for generating sample subsets)")
-    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--target-size", type=int, nargs=2, metavar=("WIDTH", "HEIGHT"),
                         default=list(DEFAULT_TARGET_SIZE),
                         help="Output face size in pixels (default: 112 112)")
@@ -236,7 +205,6 @@ def main():
         print(f"Error: {args.zip_path} not found", file=sys.stderr)
         sys.exit(1)
 
-    random.seed(args.seed)
     target_size = (args.target_size[0], args.target_size[1])
     if target_size[0] <= 0 or target_size[1] <= 0:
         print("Error: target width and height must be positive integers", file=sys.stderr)
@@ -254,11 +222,6 @@ def main():
         crop_map = _build_crop_map(zf)
         splits = _assign_splits(crop_map, dev_faces, test_faces)
         print(f"  Crops: {len(crop_map)} total, dev={len(splits['dev'])}, test={len(splits['test'])}")
-
-        if args.limit:
-            splits["train"] = sample_diverse(splits["train"], args.limit)
-            splits["dev"] = sample_diverse(splits["dev"], min(args.limit // 3, len(splits["dev"])))
-            splits["test"] = sample_diverse(splits["test"], min(args.limit // 3, len(splits["test"])))
 
         page_kpts, page_paths = ({}, {})
         if args.method == "realign":

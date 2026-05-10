@@ -25,10 +25,10 @@ python train.py --dataroot_A sample_data/wiki_face_112 \
 ## Regenerating
 
 ```bash
-# people_gator (--limit produces a subset)
+# people_gator (full preprocessing)
 python -m src.data_prep.preprocess_people_gator \
     --zip-path /path/to/people_gator__data_export.zip \
-    --output-dir sample_data/people_gator --limit 100
+    --output-dir sample_data/people_gator
 
 # wiki_face_112
 python -m src.data_prep.prepare_wiki_face \

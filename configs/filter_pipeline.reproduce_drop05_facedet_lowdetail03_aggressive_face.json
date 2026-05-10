@@ -1,0 +1,40 @@
+{
+  "input_dataset_dir": "data/people_gator_full",
+  "output_root_dir": "data/pipeline_runs/drop05_facedet_lowdetail03_aggressive_face",
+  "splits": ["train", "dev", "test"],
+  "stages": [
+    {
+      "type": "quality",
+      "name": "quality05",
+      "enabled": true,
+      "params": {
+        "drop_ratio_per_library": 0.05,
+        "min_per_identity": 1,
+        "max_per_identity": 0
+      }
+    },
+    {
+      "type": "face_detector",
+      "name": "facedet05",
+      "enabled": true,
+      "params": {
+        "drop_rate": 0.05,
+        "copy_dropped": true,
+        "keep_no_face": true,
+        "scale_factor": 1.2,
+        "min_neighbors": 5,
+        "min_size": 28
+      }
+    },
+    {
+      "type": "low_detail",
+      "name": "lowdetail03",
+      "enabled": true,
+      "params": {
+        "drop_rate": 0.03,
+        "copy_dropped": true,
+        "downscale_factor": 0.5
+      }
+    }
+  ]
+}
