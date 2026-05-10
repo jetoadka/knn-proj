@@ -1,0 +1,20 @@
+# E1: Baseline Clean
+# Train face recognition on clean WebFace4M data only (no augmentation)
+# This establishes the baseline performance on newspaper face recognition
+
+train-dir: data/downstream/E1_baseline/train
+val-dir: data/people_gator/aligned_112/dev
+
+backbone: convnext_atto
+loss: cosface
+embedding-dim: 512
+
+epochs: 30
+batch-size: 64
+lr: 0.0001
+weight-decay: 0.01
+num-workers: 4
+
+run-name: E1-baseline-clean
+eval-interval: 5
+save-dir: checkpoints

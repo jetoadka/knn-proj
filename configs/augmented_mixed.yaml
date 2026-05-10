@@ -1,0 +1,20 @@
+# E3: Augmented Mixed
+# Train face recognition on WebFace4M + CUT-generated + real newspaper (people_gator train)
+# This tests whether adding real newspaper data on top of augmented further improves results
+
+train-dir: data/downstream/E3_mixed/train
+val-dir: data/people_gator/aligned_112/dev
+
+backbone: convnext_atto
+loss: cosface
+embedding-dim: 512
+
+epochs: 30
+batch-size: 64
+lr: 0.0001
+weight-decay: 0.01
+num-workers: 4
+
+run-name: E3-augmented-mixed
+eval-interval: 5
+save-dir: checkpoints

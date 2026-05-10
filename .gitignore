@@ -42,3 +42,9 @@ dist/
 # --- OS & IDE ---
 .vscode/
 .idea/
+.DS_Store
+Thumbs.db
+results/
+
+# --- DOCUMENTS ---
+*Proposal*.pdf
