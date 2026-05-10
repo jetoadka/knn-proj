@@ -1,8 +1,6 @@
 # --- DATA ---
 data/
-data_wiki/
-data_people/
-data_combined/
+data-*/
 datasets/
 *.zip
 *.tar.gz
@@ -17,8 +15,7 @@ datasets/
 *.onnx
 *.safetensors
 outputs/
-checkpoints/
-models/
+web/
 wandb_logs/
 wandb/
 
@@ -42,12 +39,6 @@ venv/
 build/
 dist/
 
-# --- JUPYTER NOTEBOOKS ---
-.ipynb_checkpoints
-*/.ipynb_checkpoints/*
-
 # --- OS & IDE ---
 .vscode/
 .idea/
-.DS_Store
-Thumbs.db
