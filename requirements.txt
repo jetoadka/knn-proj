@@ -17,6 +17,7 @@ pyyaml
 
 # --- STYLE TRANSFER ---
 dominate
+visdom
 
 # --- EXPERIMENT TRACKING & CLEAN CODE ---
 wandb>=0.16.0
