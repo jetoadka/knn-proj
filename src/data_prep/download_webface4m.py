@@ -1,4 +1,4 @@
-"""Download WebFace4M shards from HuggingFace.
+"""Data prep: download WebFace4M shards from HuggingFace.
 
 Downloads selected shards from the gaunernst/webface4m-wds-gz dataset.
 Each shard is a .tar.gz file containing ~53k face images (112x112, aligned)
@@ -31,6 +31,13 @@ def main():
                         help="Verify downloaded shards by reading a sample image")
     args = parser.parse_args()
 
+    if args.num_shards <= 0:
+        print("Error: --num-shards must be >= 1", file=sys.stderr)
+        sys.exit(1)
+    if args.start_shard < 0 or args.start_shard >= TOTAL_SHARDS:
+        print(f"Error: --start-shard must be in [0, {TOTAL_SHARDS - 1}]", file=sys.stderr)
+        sys.exit(1)
+
     try:
         from huggingface_hub import hf_hub_download
     except ImportError:
@@ -42,6 +49,9 @@ def main():
 
     end_shard = min(args.start_shard + args.num_shards, TOTAL_SHARDS)
     shard_names = [f"webface4m-{i:04d}.tar.gz" for i in range(args.start_shard, end_shard)]
+    if not shard_names:
+        print("Error: computed shard list is empty; check --start-shard and --num-shards", file=sys.stderr)
+        sys.exit(1)
 
     print(f"Downloading {len(shard_names)} shard(s) to {args.output_dir}")
     print(f"  Shards: {shard_names[0]} ... {shard_names[-1]}")

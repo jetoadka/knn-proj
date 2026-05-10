@@ -1,4 +1,4 @@
-"""Extract and organize the wiki_face_112_fin dataset.
+"""Data prep: extract and organize the wiki_face_112_fin dataset.
 
 Usage:
     python -m src.data_prep.prepare_wiki_face \
@@ -97,7 +97,10 @@ def main():
     total = sum(counts.values())
     vals = sorted(counts.values())
     print(f"Done: {total} images, {len(counts)} identities")
-    print(f"  Images per identity: min={vals[0]}, max={vals[-1]}, median={vals[len(vals)//2]}")
+    if vals:
+        print(f"  Images per identity: min={vals[0]}, max={vals[-1]}, median={vals[len(vals)//2]}")
+    else:
+        print("  No images extracted (check archive layout and arguments).")
     if args.verify_all:
         print(f"  {'WARNING: ' + str(len(bad_sizes)) + ' wrong size' if bad_sizes else 'All verified as ' + str(TARGET_SIZE)}")
 
