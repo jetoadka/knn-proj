@@ -1,4 +1,4 @@
-"""Print statistics for all prepared datasets.
+"""Data prep: print statistics for prepared datasets.
 
 Scans the data/ directory and reports image counts, resolutions,
 identity distributions, and split sizes.

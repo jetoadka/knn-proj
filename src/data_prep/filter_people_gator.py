@@ -1,4 +1,4 @@
-"""Filter people_gator images using quality metrics with diversity guardrails.
+"""Data prep: quality filtering for people_gator with diversity guardrails.
 
 Usage:
     python -m src.data_prep.filter_people_gator \
@@ -20,10 +20,7 @@ import cv2
 import numpy as np
 from tqdm import tqdm
 
-
-def _count_images(split_dir: Path) -> list[Path]:
-    exts = {".jpg", ".jpeg", ".png"}
-    return [p for p in split_dir.rglob("*") if p.suffix.lower() in exts]
+from src.data_prep.common_dataset_ops import collect_images, write_jsonl
 
 
 def _percentile_norm(values: np.ndarray, low_q: float = 5.0, high_q: float = 95.0) -> np.ndarray:
@@ -107,12 +104,6 @@ def _select_kept(
     return kept_paths
 
 
-def _write_jsonl(path: Path, rows: list[dict]):
-    with path.open("w") as f:
-        for row in rows:
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
-
-
 def _copy_selected(
     aligned_dir: Path,
     output_dir: Path,
@@ -146,11 +137,11 @@ def _process_split(
         print(f"[{split}] not found: {split_dir}")
         return [], [], {}
 
-    image_paths = _count_images(split_dir)
     rows = []
-    for p in tqdm(image_paths, desc=f"Scoring {split}"):
-        rel = p.relative_to(split_dir)
-        metrics = _compute_metrics(p)
+    split_rows = collect_images(aligned_dir, [split])
+    for entry in tqdm(split_rows, desc=f"Scoring {split}"):
+        rel = Path(entry["rel_path"])
+        metrics = _compute_metrics(entry["abs_path"])
         if metrics is None:
             continue
         rel_parts = rel.parts
@@ -237,8 +228,8 @@ def main():
             if args.copy_selected:
                 _copy_selected(args.aligned_dir, args.output_dir, split, kept_rows, rejected_rows)
 
-    _write_jsonl(args.output_dir / "kept_manifest.jsonl", all_kept)
-    _write_jsonl(args.output_dir / "rejected_manifest.jsonl", all_rejected)
+    write_jsonl(args.output_dir / "kept_manifest.jsonl", all_kept)
+    write_jsonl(args.output_dir / "rejected_manifest.jsonl", all_rejected)
 
     summary = {
         "aligned_dir": str(args.aligned_dir),

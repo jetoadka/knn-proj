@@ -1,4 +1,4 @@
-"""Extract, resize, and split people_gator aligned face crops.
+"""Data prep: extract, align, resize, and split people_gator face crops.
 
 Usage:
     python -m src.data_prep.preprocess_people_gator \
@@ -15,6 +15,7 @@ import argparse
 import csv
 import json
 import random
+import shutil
 import sys
 import zipfile
 from pathlib import Path
@@ -242,6 +243,8 @@ def main():
         sys.exit(1)
 
     aligned_dir = args.output_dir / _target_subdir_name(target_size)
+    if aligned_dir.exists():
+        shutil.rmtree(aligned_dir)
     for split in ("train", "dev", "test"):
         (aligned_dir / split).mkdir(parents=True, exist_ok=True)
 
@@ -264,6 +267,7 @@ def main():
 
         counts = dict.fromkeys(("train", "dev", "test", "skipped"), 0)
         metadata_records: list[dict] = []
+        written_faces: set[str] = set()
         for split, faces in splits.items():
             for face in tqdm(faces, desc=split):
                 out_path = aligned_dir / split / face
@@ -275,6 +279,7 @@ def main():
                     if not cv2.imwrite(str(out_path), img):
                         raise ValueError("Failed to write image")
                     counts[split] += 1
+                    written_faces.add(face)
                     rel_parts = Path(face).parts
                     identity = str(Path(face).parent)
                     record = {
@@ -293,8 +298,8 @@ def main():
                     tqdm.write(f"  Skipped {face}: {e}")
                     counts["skipped"] += 1
 
-        all_kept = {f for faces in splits.values() for f in faces} if args.limit else None
-        _extract_jsonls(zf, args.output_dir, all_kept)
+        # Keep annotation files consistent with images that were actually written.
+        _extract_jsonls(zf, args.output_dir, written_faces)
         if args.metadata_path is not None:
             _write_metadata(metadata_records, args.metadata_path, args.metadata_format)
             print(f"  Metadata written: {args.metadata_path} ({len(metadata_records)} rows)")
