@@ -20,7 +20,7 @@ class AdaIN(nn.Module):
         sigma = self.fc_sigma(style_code).unsqueeze(-1).unsqueeze(-1) + 1.0
         return sigma * x_norm + mu
 
-class StyleEncoder(nn.Module):
+class CustomStyleEncoder(nn.Module):
     def __init__(self, input_nc=3, style_dim=64):
         super().__init__()
         self.model = nn.Sequential(
@@ -1026,31 +1026,30 @@ class ResnetGenerator(nn.Module):
 
         self.model = nn.Sequential(*model)
 
-    def forward(self, input, layers=[], encode_only=False):
+    def forward(self, input, style_code=None, layers=[], encode_only=False):
         if -1 in layers:
             layers.append(len(self.model))
         if len(layers) > 0:
             feat = input
             feats = []
             for layer_id, layer in enumerate(self.model):
-                # print(layer_id, layer)
-                # CHANGE: Check if it is an AdaIN layer
+                # ZMENA: Kontrola, či ide o AdaIN vrstvu, do ktorej pošleme štýl
                 if isinstance(layer, AdaIN):
                     feat = layer(feat, style_code)
                 else:
                     feat = layer(feat)
+                
                 if layer_id in layers:
                     feats.append(feat)
                 if layer_id == layers[-1] and encode_only:
-                    # print('encoder only return features')
-                    return feats  # return intermediate features alone; stop in the last layers
+                    return feats
 
-            return feat, feats  # return both output and intermediate features
+            return feat, feats  
         else:
             """Standard forward"""
             feat = input
             for layer in self.model:
-                # CHANGE: Same check for standard pass
+                # ZMENA: Rovnaká kontrola pre štandardný priechod
                 if isinstance(layer, AdaIN):
                     feat = layer(feat, style_code)
                 else:
