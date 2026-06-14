@@ -4,6 +4,7 @@ from .base_model import BaseModel
 from . import networks
 from .patchnce import PatchNCELoss
 import util.util as util
+import itertools
 
 
 class CUTModel(BaseModel):
@@ -67,13 +68,16 @@ class CUTModel(BaseModel):
             self.visual_names += ['idt_B']
 
         if self.isTrain:
-            self.model_names = ['G', 'F', 'D']
+            self.model_names = ['G', 'F', 'D', 'Style']
         else:  # during test time, only load G
-            self.model_names = ['G']
+            self.model_names = ['G', 'Style']
 
         # define networks (both generator and discriminator)
         self.netG = networks.define_G(opt.input_nc, opt.output_nc, opt.ngf, opt.netG, opt.normG, not opt.no_dropout, opt.init_type, opt.init_gain, opt.no_antialias, opt.no_antialias_up, self.gpu_ids, opt)
         self.netF = networks.define_F(opt.input_nc, opt.netF, opt.normG, not opt.no_dropout, opt.init_type, opt.init_gain, opt.no_antialias, self.gpu_ids, opt)
+
+        # NEW: Initialization of the style extractor
+        self.netStyle = networks.init_net(networks.CustomStyleEncoder(opt.input_nc, style_dim=64), opt.init_type, opt.init_gain, self.gpu_ids)
 
         if self.isTrain:
             self.netD = networks.define_D(opt.output_nc, opt.ndf, opt.netD, opt.n_layers_D, opt.normD, opt.init_type, opt.init_gain, opt.no_antialias, self.gpu_ids, opt)
@@ -86,7 +90,9 @@ class CUTModel(BaseModel):
                 self.criterionNCE.append(PatchNCELoss(opt).to(self.device))
 
             self.criterionIdt = torch.nn.L1Loss().to(self.device)
-            self.optimizer_G = torch.optim.Adam(self.netG.parameters(), lr=opt.lr, betas=(opt.beta1, opt.beta2))
+            
+            # Optimizer G trains both Generator and Style Encoder together
+            self.optimizer_G = torch.optim.Adam(itertools.chain(self.netG.parameters(), self.netStyle.parameters()), lr=opt.lr, betas=(opt.beta1, opt.beta2))
             self.optimizer_D = torch.optim.Adam(self.netD.parameters(), lr=opt.lr, betas=(opt.beta1, opt.beta2))
             self.optimizers.append(self.optimizer_G)
             self.optimizers.append(self.optimizer_D)
@@ -145,16 +151,27 @@ class CUTModel(BaseModel):
 
     def forward(self):
         """Run forward pass; called by both functions <optimize_parameters> and <test>."""
-        self.real = torch.cat((self.real_A, self.real_B), dim=0) if self.opt.nce_idt and self.opt.isTrain else self.real_A
-        if self.opt.flip_equivariance:
-            self.flipped_for_equivariance = self.opt.isTrain and (np.random.random() < 0.5)
-            if self.flipped_for_equivariance:
-                self.real = torch.flip(self.real, [3])
+        
+        # Pull the style from the target domain
+        self.style_code = self.netStyle(self.real_B)
 
-        self.fake = self.netG(self.real)
-        self.fake_B = self.fake[:self.real_A.size(0)]
-        if self.opt.nce_idt:
+        if self.opt.nce_idt and self.opt.isTrain:
+            self.real = torch.cat((self.real_A, self.real_B), dim=0)
+            # Duplicate the style vector since we are sending two images at once
+            self.style_code_both = torch.cat((self.style_code, self.style_code), dim=0)
+            self.fake = self.netG(self.real, style_code=self.style_code_both)
+            self.fake_B = self.fake[:self.real_A.size(0)]
             self.idt_B = self.fake[self.real_A.size(0):]
+        else:
+            self.real = self.real_A
+            if self.opt.flip_equivariance:
+                self.flipped_for_equivariance = self.opt.isTrain and (np.random.random() < 0.5)
+                if self.flipped_for_equivariance:
+                    self.real = torch.flip(self.real, [3])
+
+            # The generator draws based on the content from real_A and the style from real_B
+            self.fake = self.netG(self.real, style_code=self.style_code)
+            self.fake_B = self.fake
 
     def compute_D_loss(self):
         """Calculate GAN loss for the discriminator"""
@@ -197,12 +214,16 @@ class CUTModel(BaseModel):
 
     def calculate_NCE_loss(self, src, tgt):
         n_layers = len(self.nce_layers)
-        feat_q = self.netG(tgt, self.nce_layers, encode_only=True)
+        # Dynamically pull the styles for both images
+        style_tgt = self.netStyle(tgt)
+        feat_q = self.netG(tgt, style_code=style_tgt, layers=self.nce_layers, encode_only=True)
 
         if self.opt.flip_equivariance and self.flipped_for_equivariance:
             feat_q = [torch.flip(fq, [3]) for fq in feat_q]
 
-        feat_k = self.netG(src, self.nce_layers, encode_only=True)
+        style_src = self.netStyle(src)
+        feat_k = self.netG(src, style_code=style_src, layers=self.nce_layers, encode_only=True)
+
         feat_k_pool, sample_ids = self.netF(feat_k, self.opt.num_patches, None)
         feat_q_pool, _ = self.netF(feat_q, self.opt.num_patches, sample_ids)
 
