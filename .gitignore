@@ -1,5 +1,7 @@
 # --- DATA ---
 data-*/
+dataset/
+reference_styles/
 *.zip
 *.tar.gz
 *.jsonl
