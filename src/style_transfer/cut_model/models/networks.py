@@ -7,41 +7,6 @@ from torch.optim import lr_scheduler
 import numpy as np
 from .stylegan_networks import StyleGAN2Discriminator, StyleGAN2Generator, TileStyleGAN2Discriminator
 
-class AdaIN(nn.Module):
-    def __init__(self, style_dim, num_features):
-        super().__init__()
-        self.norm = nn.InstanceNorm2d(num_features, affine=False)
-        self.fc_mu = nn.Linear(style_dim, num_features)
-        self.fc_sigma = nn.Linear(style_dim, num_features)
-
-    def forward(self, x, style_code):
-        x_norm = self.norm(x)
-        mu = self.fc_mu(style_code).unsqueeze(-1).unsqueeze(-1)
-        sigma = self.fc_sigma(style_code).unsqueeze(-1).unsqueeze(-1) + 1.0
-        return sigma * x_norm + mu
-
-class CustomStyleEncoder(nn.Module):
-    def __init__(self, input_nc=3, style_dim=64):
-        super().__init__()
-        self.model = nn.Sequential(
-            nn.Conv2d(input_nc, 64, kernel_size=4, stride=2, padding=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(64, 128, kernel_size=4, stride=2, padding=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(128, 256, kernel_size=4, stride=2, padding=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(256, 512, kernel_size=4, stride=2, padding=1),
-            nn.ReLU(inplace=True),
-            nn.AdaptiveAvgPool2d(1)
-        )
-        self.fc = nn.Linear(512, style_dim)
-
-    def forward(self, x):
-        features = self.model(x)
-        features = features.view(features.size(0), -1)
-        style_code = self.fc(features)
-        return style_code
-    
 ###############################################################################
 # Helper Functions
 ###############################################################################
@@ -992,16 +957,9 @@ class ResnetGenerator(nn.Module):
                           Downsample(ngf * mult * 2)]
 
         mult = 2 ** n_downsampling
-
-        # CHANGE: Style injection before ResNet blocks
-        model += [AdaIN(style_dim=64, num_features=ngf * mult)]
-
         for i in range(n_blocks):       # add ResNet blocks
 
             model += [ResnetBlock(ngf * mult, padding_type=padding_type, norm_layer=norm_layer, use_dropout=use_dropout, use_bias=use_bias)]
-
-        # CHANGE: Style injection after ResNet blocks
-        model += [AdaIN(style_dim=64, num_features=ngf * mult)]
 
         for i in range(n_downsampling):  # add upsampling layers
             mult = 2 ** (n_downsampling - i)
@@ -1026,35 +984,30 @@ class ResnetGenerator(nn.Module):
 
         self.model = nn.Sequential(*model)
 
-    def forward(self, input, style_code=None, layers=[], encode_only=False):
+    def forward(self, input, layers=[], encode_only=False):
         if -1 in layers:
             layers.append(len(self.model))
         if len(layers) > 0:
             feat = input
             feats = []
             for layer_id, layer in enumerate(self.model):
-                # ZMENA: Kontrola, či ide o AdaIN vrstvu, do ktorej pošleme štýl
-                if isinstance(layer, AdaIN):
-                    feat = layer(feat, style_code)
-                else:
-                    feat = layer(feat)
-                
+                # print(layer_id, layer)
+                feat = layer(feat)
                 if layer_id in layers:
+                    # print("%d: adding the output of %s %d" % (layer_id, layer.__class__.__name__, feat.size(1)))
                     feats.append(feat)
+                else:
+                    # print("%d: skipping %s %d" % (layer_id, layer.__class__.__name__, feat.size(1)))
+                    pass
                 if layer_id == layers[-1] and encode_only:
-                    return feats
+                    # print('encoder only return features')
+                    return feats  # return intermediate features alone; stop in the last layers
 
-            return feat, feats  
+            return feat, feats  # return both output and intermediate features
         else:
             """Standard forward"""
-            feat = input
-            for layer in self.model:
-                # ZMENA: Rovnaká kontrola pre štandardný priechod
-                if isinstance(layer, AdaIN):
-                    feat = layer(feat, style_code)
-                else:
-                    feat = layer(feat)
-            return feat
+            fake = self.model(input)
+            return fake
 
 
 class ResnetDecoder(nn.Module):

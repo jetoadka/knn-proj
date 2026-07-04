@@ -1,5 +1,6 @@
 # --- DATA ---
 data-*/
+train*/
 dataset/
 reference_styles/
 *.zip
