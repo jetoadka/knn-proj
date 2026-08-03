@@ -3,7 +3,7 @@ import shutil
 import subprocess
 
 # --- SETTINGS ---
-dataroot = "../data-pg"
+dataroot = "../data"
 testB_dir = os.path.join(dataroot, "testB")
 styles_dir = "../reference_styles"  # Directory with 5 reference styles
 output_base = "./results/conditional_cut_pg_200/test_latest/images" # Default CUT output path

@@ -15,7 +15,7 @@ if __name__ == '__main__':
     wandb.init(
         entity="knn-proj",
         project="style-transfer",
-        name="CUT-experiment-200",
+        name="contrastive-CUT-50M-param",
         config=vars(opt)
     )
 

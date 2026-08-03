@@ -555,31 +555,44 @@ class PatchSampleF(nn.Module):
         return_feats = []
         if self.use_mlp and not self.mlp_init:
             self.create_mlp(feats)
+            
         for feat_id, feat in enumerate(feats):
             B, H, W = feat.shape[0], feat.shape[2], feat.shape[3]
-            feat_reshape = feat.permute(0, 2, 3, 1).flatten(1, 2)
+            feat_reshape = feat.permute(0, 2, 3, 1).flatten(1, 2) # [B, H*W, C]
+            max_patches = feat_reshape.shape[1]
+            
             if num_patches > 0:
                 if patch_ids is not None:
                     patch_id = patch_ids[feat_id]
+                    # TVRDÁ POISTKA: Zabráni akémukoľvek 'out of bounds' erroru
+                    # orezaním indexov presne na maximálnu povolenú veľkosť aktuálneho tenzora.
+                    patch_id = torch.clamp(patch_id, min=0, max=max_patches - 1)
                 else:
-                    # torch.randperm produces cudaErrorIllegalAddress for newer versions of PyTorch. https://github.com/taesungp/contrastive-unpaired-translation/issues/83
-                    #patch_id = torch.randperm(feat_reshape.shape[1], device=feats[0].device)
-                    patch_id = np.random.permutation(feat_reshape.shape[1])
-                    patch_id = patch_id[:int(min(num_patches, patch_id.shape[0]))]  # .to(patch_ids.device)
-                patch_id = torch.tensor(patch_id, dtype=torch.long, device=feat.device)
-                x_sample = feat_reshape[:, patch_id, :].flatten(0, 1)  # reshape(-1, x.shape[1])
+                    num_samples = min(num_patches, max_patches)
+                    # Generovanie 2D indexov pre bezpečný DataParallel
+                    patch_id = torch.stack([torch.randperm(max_patches, device=feat.device)[:num_samples] for _ in range(B)], dim=0)
+                
+                # Aplikovanie indexov bezpečne pomocou torch.gather
+                patch_id_expanded = patch_id.unsqueeze(-1).expand(-1, -1, feat_reshape.shape[-1])
+                x_sample = torch.gather(feat_reshape, 1, patch_id_expanded)
+                x_sample = x_sample.flatten(0, 1) # Sploštenie na [B * num_samples, C] pre NCE loss
+                
             else:
                 x_sample = feat_reshape
                 patch_id = []
+                
             if self.use_mlp:
                 mlp = getattr(self, 'mlp_%d' % feat_id)
                 x_sample = mlp(x_sample)
+                
             return_ids.append(patch_id)
             x_sample = self.l2norm(x_sample)
 
             if num_patches == 0:
                 x_sample = x_sample.permute(0, 2, 1).reshape([B, x_sample.shape[-1], H, W])
+                
             return_feats.append(x_sample)
+            
         return return_feats, return_ids
 
 

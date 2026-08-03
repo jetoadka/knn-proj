@@ -3,6 +3,7 @@ data-*/
 train*/
 dataset/
 reference_styles/
+final_style_results/
 *.zip
 *.tar.gz
 *.jsonl
