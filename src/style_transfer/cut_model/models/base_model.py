@@ -104,7 +104,19 @@ class BaseModel(ABC):
         for name in self.model_names:
             if isinstance(name, str):
                 net = getattr(self, 'net' + name)
-                setattr(self, 'net' + name, torch.nn.DataParallel(net, self.opt.gpu_ids))
+                # --- Changed for DDP ---
+                if getattr(self.opt, 'is_distributed', False):
+                    # Wrap network in DDP. We use find_unused_parameters=True 
+                    # because CUT sometimes has layers it doesn't use in every pass.
+                    setattr(self, 'net' + name, torch.nn.parallel.DistributedDataParallel(
+                        net, 
+                        device_ids=[self.opt.gpu_ids[0]], 
+                        output_device=self.opt.gpu_ids[0],
+                        find_unused_parameters=False 
+                    ))
+                else:
+                    # Fallback to single GPU or DataParallel if not using DDP
+                    setattr(self, 'net' + name, torch.nn.DataParallel(net, self.opt.gpu_ids))
 
     def data_dependent_initialize(self, data):
         pass

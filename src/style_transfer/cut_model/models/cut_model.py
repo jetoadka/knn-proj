@@ -27,7 +27,7 @@ class CUTModel(BaseModel):
                             type=util.str2bool, nargs='?', const=True, default=False,
                             help="Enforce flip-equivariance as additional regularization. It's used by FastCUT, but not CUT")
         
-        # NOVÉ: Pridaný parameter pre veľkosť štýlového vektora
+        # ADD: Parameter for size of the style vector
         parser.add_argument('--nz', type=int, default=256, help='size of the latent style vector')
 
         parser.set_defaults(pool_size=0)  # no image pooling
@@ -49,7 +49,7 @@ class CUTModel(BaseModel):
     def __init__(self, opt):
         BaseModel.__init__(self, opt)
 
-        self.loss_names = ['G_GAN', 'D_real', 'D_fake', 'G', 'NCE', 'G_VGG']
+        self.loss_names = ['G_GAN', 'D_real', 'D_fake', 'G', 'NCE', 'G_VGG', 'G_color']
         self.visual_names = ['real_A', 'fake_B', 'real_B']
         self.nce_layers = [int(i) for i in self.opt.nce_layers.split(',')]
 
@@ -63,10 +63,10 @@ class CUTModel(BaseModel):
         else:  # during test time, load G and E
             self.model_names = ['G', 'E']
 
-        # 1. Štandardný Generátor (už nevyžaduje zdvojené kanály)
+        # Generator
         self.netG = networks.define_G(opt.input_nc, opt.output_nc, opt.ngf, opt.netG, opt.normG, not opt.no_dropout, opt.init_type, opt.init_gain, opt.no_antialias, opt.no_antialias_up, self.gpu_ids, opt)
         
-        # 2. NOVÉ: Inicializácia Style Enkodéra
+        # ADD: Initiliazation of Style Encoder
         self.netE = networks.init_net(networks.E_adaIN(opt.input_nc, output_nc=opt.nz), opt.init_type, opt.init_gain, self.gpu_ids)
 
         self.netF = networks.define_F(opt.input_nc, opt.netF, opt.normG, not opt.no_dropout, opt.init_type, opt.init_gain, opt.no_antialias, self.gpu_ids, opt)
@@ -83,7 +83,7 @@ class CUTModel(BaseModel):
 
             self.criterionIdt = torch.nn.L1Loss().to(self.device)
             
-            # NOVÉ: Optimizer teraz trénuje Generátor aj Enkodér spoločne
+            # ADD: Optimizer trains Generator and Style Encoder together
             self.optimizer_G = torch.optim.Adam(itertools.chain(self.netG.parameters(), self.netE.parameters()), lr=opt.lr, betas=(opt.beta1, opt.beta2)) 
             self.optimizer_D = torch.optim.Adam(self.netD.parameters(), lr=opt.lr, betas=(opt.beta1, opt.beta2))
             self.optimizers.append(self.optimizer_G)
@@ -118,6 +118,9 @@ class CUTModel(BaseModel):
             self.optimizer_F.zero_grad()
         self.loss_G = self.compute_G_loss()
         self.loss_G.backward()
+        
+        torch.nn.utils.clip_grad_norm_(itertools.chain(self.netG.parameters(), self.netE.parameters()), max_norm=10.0)
+        
         self.optimizer_G.step()
         if self.opt.netF == 'mlp_sample':
             self.optimizer_F.step()
@@ -129,14 +132,20 @@ class CUTModel(BaseModel):
         self.image_paths = input['A_paths' if AtoB else 'B_paths']
 
     def forward(self):
-        # 1. NOVÉ: Extrakcia 1D štýlového vektora z referenčného obrázka
+        # ADD: 1D style vecor extraction from reference image
         self.style_code = self.netE(self.real_B)
         
-        # 2. NOVÉ: Generovanie obrázka (obsah A + štýl B)
-        self.fake_B = self.netG(self.real_A, style=self.style_code)
-        
         if self.opt.nce_idt:
-            self.idt_B = self.netG(self.real_B, style=self.style_code)
+            # ADD: United inputs to one pass
+            combined_input = torch.cat([self.real_A, self.real_B], dim=0)
+            combined_style = torch.cat([self.style_code, self.style_code], dim=0)
+            combined_out = self.netG(combined_input, style=combined_style)
+            
+            # ADD: Divide input back on fake_B and idt_B
+            self.fake_B, self.idt_B = combined_out.chunk(2, dim=0)
+        else:
+            # ADD:Image generation (A + style B)
+            self.fake_B = self.netG(self.real_A, style=self.style_code)
 
     def compute_D_loss(self):
         fake = self.fake_B.detach()
@@ -169,22 +178,29 @@ class CUTModel(BaseModel):
         else:
             loss_NCE_both = self.loss_NCE
 
-        self.loss_G_VGG = self.criterionVGG(self.fake_B, self.real_B) * 10.0
-        self.loss_G = self.loss_G_GAN + loss_NCE_both + self.loss_G_VGG
+        self.loss_G_VGG = self.criterionVGG(self.fake_B, self.real_B) * 100.0
+
+        mean_fake = self.fake_B.mean(dim=[2, 3])
+        mean_real = self.real_B.mean(dim=[2, 3])
+        
+        self.loss_G_color = torch.nn.functional.mse_loss(mean_fake, mean_real) * 1.0
+
+        self.loss_G = self.loss_G_GAN + loss_NCE_both + self.loss_G_VGG + self.loss_G_color
         return self.loss_G
 
     def calculate_NCE_loss(self, src, tgt):
         n_layers = len(self.nce_layers)
         
-        feat_q = self.netG(tgt, nce_layers=self.nce_layers, encode_only=True)
+        # ADD: Unite src and tgt into one through netG
+        combined_input = torch.cat([tgt, src], dim=0)
+        combined_feats = self.netG(combined_input, nce_layers=self.nce_layers, encode_only=True)
         
-        if self.opt.flip_equivariance and hasattr(self, 'flipped_for_equivariance') and self.flipped_for_equivariance:
-            feat_q = [torch.flip(fq, [3]) for fq in feat_q]
+        # Rozdelenie výsledkov späť
+        feat_q = [f[:tgt.size(0)] for f in combined_feats]
+        feat_k = [f[tgt.size(0):] for f in combined_feats]
 
         if self.opt.flip_equivariance and hasattr(self, 'flipped_for_equivariance') and self.flipped_for_equivariance:
             feat_q = [torch.flip(fq, [3]) for fq in feat_q]
-
-        feat_k = self.netG(src, nce_layers=self.nce_layers, encode_only=True)
 
         feat_k_pool, sample_ids = self.netF(feat_k, self.opt.num_patches, None)
         feat_q_pool, _ = self.netF(feat_q, self.opt.num_patches, sample_ids)

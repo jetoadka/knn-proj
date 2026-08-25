@@ -453,8 +453,8 @@ class Normalize(nn.Module):
         self.power = power
 
     def forward(self, x):
-        norm = x.pow(self.power).sum(1, keepdim=True).pow(1. / self.power)
-        out = x.div(norm + 1e-7)
+        norm = (x.pow(self.power).sum(1, keepdim=True) + 1e-7).pow(1. / self.power)
+        out = x.div(norm)
         return out
 
 
@@ -564,18 +564,17 @@ class PatchSampleF(nn.Module):
             if num_patches > 0:
                 if patch_ids is not None:
                     patch_id = patch_ids[feat_id]
-                    # TVRDÁ POISTKA: Zabráni akémukoľvek 'out of bounds' erroru
-                    # orezaním indexov presne na maximálnu povolenú veľkosť aktuálneho tenzora.
+                    # ADD: Crop indexs exactly on max allowed size of tensor, to not to cause "out of bounds" error
                     patch_id = torch.clamp(patch_id, min=0, max=max_patches - 1)
                 else:
                     num_samples = min(num_patches, max_patches)
-                    # Generovanie 2D indexov pre bezpečný DataParallel
+                    # ADD: 2D indexs generation for save DataParallel
                     patch_id = torch.stack([torch.randperm(max_patches, device=feat.device)[:num_samples] for _ in range(B)], dim=0)
                 
-                # Aplikovanie indexov bezpečne pomocou torch.gather
+                # Index aplication save using tourch.gather
                 patch_id_expanded = patch_id.unsqueeze(-1).expand(-1, -1, feat_reshape.shape[-1])
                 x_sample = torch.gather(feat_reshape, 1, patch_id_expanded)
-                x_sample = x_sample.flatten(0, 1) # Sploštenie na [B * num_samples, C] pre NCE loss
+                x_sample = x_sample.flatten(0, 1) # For NCE loss [B * num_samples, C]
                 
             else:
                 x_sample = feat_reshape
@@ -702,33 +701,115 @@ class ContentEncoder(nn.Module):
         for layer_id, layer in enumerate(self.model):
             print(layer_id, layer)
 
+class AdaptiveInstanceNorm2d(nn.Module):
+    def __init__(self, num_features, style_dim=256):
+        super().__init__()
+        # Norm does not have affine parametrs (will be added by style)
+        self.norm = nn.InstanceNorm2d(num_features, affine=False)
+        
+        # Linear layer, which will compute gamma and beta from vector style
+        self.fc = nn.Linear(style_dim, num_features * 2)
+        
+        # For stable training: Inicialiaze with gamma=1 and beta=0, so in the start AdaIN is not working
+        self.fc.weight.data.fill_(0.0)
+        self.fc.bias.data[:num_features] = 1.0
+        self.fc.bias.data[num_features:] = 0.0
+
+    def forward(self, x, style):
+        # Compute parameters from style
+        style_params = self.fc(style)
+        gamma, beta = style_params.chunk(2, dim=1)
+        
+        # Change representaion [Batch, Channels, 1, 1]
+        gamma = gamma.view(gamma.shape[0], -1, 1, 1)
+        beta = beta.view(beta.shape[0], -1, 1, 1)
+        
+        # Aplicate normalization and modul with style
+        x_norm = self.norm(x)
+        return gamma * x_norm + beta
+
+
+class AdaINResBlock(nn.Module):
+    def __init__(self, dim, style_dim, padding_type='reflect'):
+        super().__init__()
+        
+        if padding_type == 'reflect':
+            self.pad1 = nn.ReflectionPad2d(1)
+            self.pad2 = nn.ReflectionPad2d(1)
+        else:
+            self.pad1 = nn.ZeroPad2d(1)
+            self.pad2 = nn.ZeroPad2d(1)
+
+        self.conv1 = nn.Conv2d(dim, dim, kernel_size=3, padding=0)
+        self.adain1 = AdaptiveInstanceNorm2d(dim, style_dim)
+        self.relu = nn.ReLU(True)
+        
+        self.conv2 = nn.Conv2d(dim, dim, kernel_size=3, padding=0)
+        self.adain2 = AdaptiveInstanceNorm2d(dim, style_dim)
+
+    def forward(self, x, style):
+        out = self.pad1(x)
+        out = self.conv1(out)
+        out = self.adain1(out, style) # AdaIN replaces norm
+        out = self.relu(out)
+        
+        out = self.pad2(out)
+        out = self.conv2(out)
+        out = self.adain2(out, style)
+        
+        return out + x
+
 
 class Decoder_all(nn.Module):
-    def __init__(self, n_upsample, n_res, dim, output_dim, norm='batch', activ='relu', pad_type='zero', nz=0):
+    def __init__(self, n_upsample, n_res, dim, output_dim, norm='batch', activ='relu', pad_type='zero', nz=256):
         super(Decoder_all, self).__init__()
-        # AdaIN residual blocks
-        self.resnet_block = ResBlocks(n_res, dim, norm, activ, pad_type=pad_type, nz=nz)
-        self.n_blocks = 0
-        # upsampling blocks
+        self.nz = nz
+        
+        # AdaIN residual blocks (bottleneck)
+        self.n_res = n_res
+        for i in range(n_res):
+            setattr(self, f'res_block_{i}', AdaINResBlock(dim, style_dim=nz, padding_type=pad_type))
+            
+        self.n_upsample = n_upsample
+        # Upsampling blocks with added AdaIN for texture
         for i in range(n_upsample):
-            block = [Upsample2(scale_factor=2), Conv2dBlock(dim + nz, dim // 2, 5, 1, 2, norm='ln', activation=activ, pad_type='reflect')]
-            setattr(self, 'block_{:d}'.format(self.n_blocks), nn.Sequential(*block))
-            self.n_blocks += 1
+            upsample = Upsample2(scale_factor=2)
+            # Convolution without norm and activation
+            conv = Conv2dBlock(dim, dim // 2, 5, 1, 2, norm='none', activation='none', pad_type='reflect')
+            # One more AdaIn in upsampling, for texture
+            adain = AdaptiveInstanceNorm2d(dim // 2, style_dim=nz)
+            relu = nn.ReLU(True)
+            
+            block = nn.ModuleList([upsample, conv, adain, relu])
+            setattr(self, f'up_block_{i}', block)
             dim //= 2
-        # use reflection padding in the last conv layer
-        setattr(self, 'block_{:d}'.format(self.n_blocks), Conv2dBlock(dim + nz, output_dim, 7, 1, 3, norm='none', activation='tanh', pad_type='reflect'))
-        self.n_blocks += 1
+            
+        # Final convolution
+        self.last_conv = Conv2dBlock(dim, output_dim, 7, 1, 3, norm='none', activation='tanh', pad_type='reflect')
 
     def forward(self, x, y=None):
+        out = x
+        
+        # Style (y) through AdaIN layers
         if y is not None:
-            output = self.resnet_block(cat_feature(x, y))
-            for n in range(self.n_blocks):
-                block = getattr(self, 'block_{:d}'.format(n))
-                if n > 0:
-                    output = block(cat_feature(output, y))
-                else:
-                    output = block(output)
-            return output
+            # Passage through AdaIN ResBlocks
+            for i in range(self.n_res):
+                res_block = getattr(self, f'res_block_{i}')
+                out = res_block(out, y)
+                
+            # Passage through upsampling blocks with texture modulation
+            for i in range(self.n_upsample):
+                up, conv, adain, relu = getattr(self, f'up_block_{i}')
+                out = up(out)
+                out = conv(out)
+                out = adain(out, y)
+                out = relu(out)
+        else:
+            # Failsafe, if model calls decoder without style
+            raise ValueError("Decoder_all vyžaduje štýlový vektor 'y' pre AdaIN!")
+            
+        out = self.last_conv(out)
+        return out
 
 
 class Decoder(nn.Module):

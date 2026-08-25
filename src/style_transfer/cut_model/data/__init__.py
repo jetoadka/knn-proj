@@ -13,6 +13,9 @@ See our template dataset class 'template_dataset.py' for more details.
 import importlib
 import torch.utils.data
 from data.base_dataset import BaseDataset
+from torch.utils.data.distributed import DistributedSampler
+import os
+from torch.utils.data import DataLoader
 
 
 def find_dataset_using_name(dataset_name):
@@ -43,6 +46,20 @@ def get_option_setter(dataset_name):
     dataset_class = find_dataset_using_name(dataset_name)
     return dataset_class.modify_commandline_options
 
+class DDPDataLoader:
+    def __init__(self, dataloader, sampler):
+        self.dataloader = dataloader
+        self.sampler = sampler
+        
+    def __len__(self):
+        return len(self.dataloader.dataset)
+        
+    def __iter__(self):
+        return iter(self.dataloader)
+        
+    def set_epoch(self, epoch):
+        if self.sampler is not None:
+            self.sampler.set_epoch(epoch)
 
 def create_dataset(opt):
     """Create a dataset given the option.
@@ -54,9 +71,33 @@ def create_dataset(opt):
         >>> from data import create_dataset
         >>> dataset = create_dataset(opt)
     """
-    data_loader = CustomDatasetDataLoader(opt)
-    dataset = data_loader.load_data()
-    return dataset
+    dataset = find_dataset_using_name(opt.dataset_mode)(opt)
+    
+    # --- Added for DDP ---
+    is_distributed = getattr(opt, 'is_distributed', False)
+    
+    if is_distributed:
+        sampler = DistributedSampler(
+            dataset,
+            num_replicas=int(os.environ['WORLD_SIZE']),
+            rank=int(os.environ['RANK'])
+        )
+        shuffle = False # Sampler handles shuffling
+    else:
+        sampler = None
+        shuffle = not opt.serial_batches
+
+    dataloader = DataLoader(
+        dataset,
+        batch_size=opt.batch_size,
+        shuffle=shuffle,
+        sampler=sampler,
+        num_workers=int(opt.num_threads),
+        drop_last=opt.isTrain # Recommended for CUT
+    )
+    
+    # Custom wrapper class (if you have one)
+    return DDPDataLoader(dataloader, sampler)
 
 
 class CustomDatasetDataLoader():
